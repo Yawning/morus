@@ -227,12 +227,12 @@ loopblocks:
 	VZEROUPPER
 	RET
 
-// func decryptLastBlockAVX2(s *uint64, out, in *byte, mask *uint64)
+// func decryptLastBlockAVX2(s *uint64, out, in *byte, inLen uint64)
 TEXT ·decryptLastBlockAVX2(SB), NOSPLIT, $0-32
 	MOVQ s+0(FP), R8
 	MOVQ out+8(FP), R9
 	MOVQ in+16(FP), R10
-	MOVQ mask+24(FP), R11
+	MOVQ inLen+24(FP), R11
 
 	VMOVDQU (R8), Y0
 	VMOVDQU 32(R8), Y1
@@ -248,9 +248,17 @@ TEXT ·decryptLastBlockAVX2(SB), NOSPLIT, $0-32
 	VPXOR  Y6, Y7, Y6
 	VPXOR  Y5, Y6, Y5
 
-	VMOVDQU (R11), Y6
-	VPAND   Y5, Y6, Y5
 	VMOVDQU Y5, (R9)
+
+	MOVQ R11, AX
+
+loopclear:
+	MOVB $0, (R9)(AX*1)
+	ADDQ $1, AX
+	CMPQ AX, $32
+	JNE  loopclear
+
+	VMOVDQU (R9), Y5
 
 	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
 

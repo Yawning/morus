@@ -9,8 +9,6 @@
 
 package morus
 
-import "math"
-
 //go:noescape
 func cpuidAmd64(cpuidParams *uint32)
 
@@ -30,7 +28,7 @@ func encryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
 func decryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
 
 //go:noescape
-func decryptLastBlockAVX2(s *uint64, out, in *byte, mask *uint64)
+func decryptLastBlockAVX2(s *uint64, out, in *byte, inLen uint64)
 
 //go:noescape
 func finalizeAVX2(s *uint64, tag *byte, lastBlock *uint64)
@@ -113,28 +111,6 @@ func encryptDataYMM(s *state, out, in []byte) {
 	}
 }
 
-func decryptPartialBlockYMM(s *state, out, in []byte) {
-	// Yeah this is kind of crap, and doesn't gain much over the naive
-	// (or reference) implementation.
-	var mask [4]uint64
-	subMask := (uint64(1) << uint((len(in)*8)&63)) - 1
-	switch len(in) / 8 {
-	case 0:
-		mask[0] = subMask
-	case 1:
-		mask[0], mask[1] = math.MaxUint64, subMask
-	case 2:
-		mask[0], mask[1], mask[2] = math.MaxUint64, math.MaxUint64, subMask
-	case 3:
-		mask[0], mask[1], mask[2], mask[3] = math.MaxUint64, math.MaxUint64, math.MaxUint64, subMask
-	}
-
-	var tmp [blockSize]byte
-	copy(tmp[:], in)
-	decryptLastBlockAVX2(&s.s[0], &tmp[0], &tmp[0], &mask[0])
-	copy(out, tmp[:])
-}
-
 func decryptDataYMM(s *state, out, in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
@@ -148,7 +124,10 @@ func decryptDataYMM(s *state, out, in []byte) {
 	out, in = out[off:], in[off:]
 
 	if len(in) > 0 {
-		decryptPartialBlockYMM(s, out, in)
+		var tmp [blockSize]byte
+		copy(tmp[:], in)
+		decryptLastBlockAVX2(&s.s[0], &tmp[0], &tmp[0], uint64(len(in)))
+		copy(out, tmp[:])
 	}
 }
 
