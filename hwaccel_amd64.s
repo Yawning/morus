@@ -29,14 +29,41 @@ TEXT ·xgetbv0Amd64(SB), NOSPLIT, $0-8
 	MOVL DX, 4(BX)
 	RET
 
-DATA ·init_ones<>+0x00(SB)/8, $0xffffffffffffffff
-DATA ·init_ones<>+0x08(SB)/8, $0xffffffffffffffff
-DATA ·init_ones<>+0x10(SB)/8, $0xffffffffffffffff
-DATA ·init_ones<>+0x18(SB)/8, $0xffffffffffffffff
-GLOBL ·init_ones<>(SB), (NOPTR+RODATA), $32
+// Some useful macros for loading/storing the state, and the state update
+// function, along with aliases for the registers used for readability.
 
-// TODO: Think about instruction scheduling.
-#define STATE_UPDATE(S0, S1, S2, S3, S4, M0, T0, T1) \
+// YMM Registers: Sx -> State, Mx -> Message, Tx -> Temporary
+//
+// Note: Routines use other registers as temporaries, the Tx aliases are
+// for those that are clobbered by STATE_UPDATE().
+#define S0 Y0
+#define S1 Y1
+#define S2 Y2
+#define S3 Y3
+#define S4 Y4
+#define M0 Y5
+#define T0 Y14
+#define T1 Y15
+
+#define LOAD_STATE(SRC) \
+	VMOVDQU (SRC), S0    \
+	VMOVDQU 32(SRC), S1  \
+	VMOVDQU 64(SRC), S2  \
+	VMOVDQU 96(SRC), S3  \
+	VMOVDQU 128(SRC), S4
+
+#define STORE_STATE(DST) \
+	VMOVDQU S0, (DST)    \
+	VMOVDQU S1, 32(DST)  \
+	VMOVDQU S2, 64(DST)  \
+	VMOVDQU S3, 96(DST)  \
+	VMOVDQU S4, 128(DST)
+
+// This essentially naively translated from the intrinsics, but neither GCC nor
+// clang's idea of what this should be appears to be better on Broadwell, and
+// there is a benefit to being easy to cross reference with the upstream
+// implementation.
+#define STATE_UPDATE() \
 	VPXOR  S0, S3, S0    \
 	VPAND  S1, S2, T0    \
 	VPXOR  S0, T0, S0    \
@@ -88,31 +115,24 @@ TEXT ·initAVX2(SB), NOSPLIT, $0-32
 	MOVQ iv+16(FP), R10
 	MOVQ initConsts+24(FP), R11
 
-	VPXOR   Y0, Y0, Y0
-	MOVOU   (R10), X0
-	VMOVDQU (R9), Y1
-	VMOVDQU ·init_ones<>(SB), Y2
-	VPXOR   Y3, Y3, Y3
-	VMOVDQU (R11), Y4
-
-	VPXOR   Y5, Y5, Y5
-	VMOVDQA Y1, Y6
+	VPXOR    S0, S0, S0
+	MOVOU    (R10), X0
+	VMOVDQU  (R9), S1
+	VPCMPEQD S2, S2, S2
+	VPXOR    S3, S3, S3
+	VMOVDQU  (R11), S4
+	VPXOR    M0, M0, M0
+	VMOVDQA  S1, Y6
 
 	MOVQ $16, AX
 
 initloop:
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
-
+	STATE_UPDATE()
 	SUBQ $1, AX
 	JNZ  initloop
 
-	VPXOR Y6, Y1, Y1
-
-	VMOVDQU Y0, (R8)
-	VMOVDQU Y1, 32(R8)
-	VMOVDQU Y2, 64(R8)
-	VMOVDQU Y3, 96(R8)
-	VMOVDQU Y4, 128(R8)
+	VPXOR Y6, S1, S1
+	STORE_STATE(R8)
 
 	VZEROUPPER
 	RET
@@ -123,26 +143,16 @@ TEXT ·absorbBlocksAVX2(SB), NOSPLIT, $0-24
 	MOVQ in+8(FP), R10
 	MOVQ blocks+16(FP), R11
 
-	VMOVDQU (R8), Y0
-	VMOVDQU 32(R8), Y1
-	VMOVDQU 64(R8), Y2
-	VMOVDQU 96(R8), Y3
-	VMOVDQU 128(R8), Y4
+	LOAD_STATE(R8)
 
 loopblocks:
-	VMOVDQU (R10), Y5
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
+	VMOVDQU (R10), M0
+	STATE_UPDATE()
+	ADDQ    $32, R10
+	SUBQ    $1, R11
+	JNZ     loopblocks
 
-	ADDQ $32, R10
-
-	SUBQ $1, R11
-	JNZ  loopblocks
-
-	VMOVDQU Y0, (R8)
-	VMOVDQU Y1, 32(R8)
-	VMOVDQU Y2, 64(R8)
-	VMOVDQU Y3, 96(R8)
-	VMOVDQU Y4, 128(R8)
+	STORE_STATE(R8)
 
 	VZEROUPPER
 	RET
@@ -154,35 +164,23 @@ TEXT ·encryptBlocksAVX2(SB), NOSPLIT, $0-32
 	MOVQ in+16(FP), R10
 	MOVQ blocks+24(FP), R11
 
-	VMOVDQU (R8), Y0
-	VMOVDQU 32(R8), Y1
-	VMOVDQU 64(R8), Y2
-	VMOVDQU 96(R8), Y3
-	VMOVDQU 128(R8), Y4
+	LOAD_STATE(R8)
 
 loopblocks:
-	VMOVDQU (R10), Y5
-
-	VPERMQ  $57, Y1, Y6
-	VPXOR   Y0, Y6, Y6
-	VPAND   Y2, Y3, Y7
+	VMOVDQU (R10), M0
+	VPERMQ  $57, S1, Y6
+	VPXOR   S0, Y6, Y6
+	VPAND   S2, S3, Y7
 	VPXOR   Y6, Y7, Y6
-	VPXOR   Y5, Y6, Y6
+	VPXOR   M0, Y6, Y6
 	VMOVDQU Y6, (R9)
+	STATE_UPDATE()
+	ADDQ    $32, R9
+	ADDQ    $32, R10
+	SUBQ    $1, R11
+	JNZ     loopblocks
 
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
-
-	ADDQ $32, R9
-	ADDQ $32, R10
-
-	SUBQ $1, R11
-	JNZ  loopblocks
-
-	VMOVDQU Y0, (R8)
-	VMOVDQU Y1, 32(R8)
-	VMOVDQU Y2, 64(R8)
-	VMOVDQU Y3, 96(R8)
-	VMOVDQU Y4, 128(R8)
+	STORE_STATE(R8)
 
 	VZEROUPPER
 	RET
@@ -194,35 +192,23 @@ TEXT ·decryptBlocksAVX2(SB), NOSPLIT, $0-32
 	MOVQ in+16(FP), R10
 	MOVQ blocks+24(FP), R11
 
-	VMOVDQU (R8), Y0
-	VMOVDQU 32(R8), Y1
-	VMOVDQU 64(R8), Y2
-	VMOVDQU 96(R8), Y3
-	VMOVDQU 128(R8), Y4
+	LOAD_STATE(R8)
 
 loopblocks:
-	VMOVDQU (R10), Y5
-
-	VPERMQ  $57, Y1, Y6
-	VPXOR   Y0, Y6, Y6
-	VPAND   Y2, Y3, Y7
+	VMOVDQU (R10), M0
+	VPERMQ  $57, S1, Y6
+	VPXOR   S0, Y6, Y6
+	VPAND   S2, S3, Y7
 	VPXOR   Y6, Y7, Y6
-	VPXOR   Y5, Y6, Y5
-	VMOVDQU Y5, (R9)
+	VPXOR   M0, Y6, M0
+	VMOVDQU M0, (R9)
+	STATE_UPDATE()
+	ADDQ    $32, R9
+	ADDQ    $32, R10
+	SUBQ    $1, R11
+	JNZ     loopblocks
 
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
-
-	ADDQ $32, R9
-	ADDQ $32, R10
-
-	SUBQ $1, R11
-	JNZ  loopblocks
-
-	VMOVDQU Y0, (R8)
-	VMOVDQU Y1, 32(R8)
-	VMOVDQU Y2, 64(R8)
-	VMOVDQU Y3, 96(R8)
-	VMOVDQU Y4, 128(R8)
+	STORE_STATE(R8)
 
 	VZEROUPPER
 	RET
@@ -234,21 +220,15 @@ TEXT ·decryptLastBlockAVX2(SB), NOSPLIT, $0-32
 	MOVQ in+16(FP), R10
 	MOVQ inLen+24(FP), R11
 
-	VMOVDQU (R8), Y0
-	VMOVDQU 32(R8), Y1
-	VMOVDQU 64(R8), Y2
-	VMOVDQU 96(R8), Y3
-	VMOVDQU 128(R8), Y4
+	LOAD_STATE(R8)
 
-	VMOVDQU (R10), Y5
-
-	VPERMQ $57, Y1, Y6
-	VPXOR  Y0, Y6, Y6
-	VPAND  Y2, Y3, Y7
-	VPXOR  Y6, Y7, Y6
-	VPXOR  Y5, Y6, Y5
-
-	VMOVDQU Y5, (R9)
+	VMOVDQU (R10), M0
+	VPERMQ  $57, S1, Y6
+	VPXOR   S0, Y6, Y6
+	VPAND   S2, S3, Y7
+	VPXOR   Y6, Y7, Y6
+	VPXOR   M0, Y6, M0
+	VMOVDQU M0, (R9)
 
 	MOVQ R11, AX
 
@@ -258,15 +238,9 @@ loopclear:
 	CMPQ AX, $32
 	JNE  loopclear
 
-	VMOVDQU (R9), Y5
-
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
-
-	VMOVDQU Y0, (R8)
-	VMOVDQU Y1, 32(R8)
-	VMOVDQU Y2, 64(R8)
-	VMOVDQU Y3, 96(R8)
-	VMOVDQU Y4, 128(R8)
+	VMOVDQU (R9), M0
+	STATE_UPDATE()
+	STORE_STATE(R8)
 
 	VZEROUPPER
 	RET
@@ -277,29 +251,23 @@ TEXT ·finalizeAVX2(SB), NOSPLIT, $0-24
 	MOVQ tag+8(FP), R9
 	MOVQ lastBlock+16(FP), R10
 
-	VMOVDQU (R8), Y0
-	VMOVDQU 32(R8), Y1
-	VMOVDQU 64(R8), Y2
-	VMOVDQU 96(R8), Y3
-	VMOVDQU 128(R8), Y4
+	LOAD_STATE(R8)
 
-	VPXOR Y4, Y0, Y4
+	VPXOR   S4, S0, S4
+	VMOVDQU (R10), M0
 
-	VMOVDQU (R10), Y5
-	MOVQ    $10, AX
+	MOVQ $10, AX
 
 finalloop:
-	STATE_UPDATE(Y0, Y1, Y2, Y3, Y4, Y5, Y14, Y15)
-
+	STATE_UPDATE()
 	SUBQ $1, AX
 	JNZ  finalloop
 
-	VPERMQ $57, Y1, Y6
-	VPXOR  Y0, Y6, Y6
-	VPAND  Y2, Y3, Y7
-	VPXOR  Y6, Y7, Y5
-
-	MOVOU X5, (R9)
+	VPERMQ $57, S1, Y6
+	VPXOR  S0, Y6, Y6
+	VPAND  S2, S3, Y7
+	VPXOR  Y6, Y7, Y7
+	MOVOU  X7, (R9)
 
 	VZEROUPPER
 	RET
