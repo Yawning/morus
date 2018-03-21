@@ -108,19 +108,18 @@ TEXT ·xgetbv0Amd64(SB), NOSPLIT, $0-8
 	VPOR   T0, T1, S4    \
 	VPERMQ $-109, S2, S2
 
-// func initAVX2(s *uint64, key, iv *byte, initConsts *uint64)
-TEXT ·initAVX2(SB), NOSPLIT, $0-32
+// func initAVX2(s *uint64, key, iv *byte)
+TEXT ·initAVX2(SB), NOSPLIT, $0-24
 	MOVQ s+0(FP), R8
 	MOVQ key+8(FP), R9
 	MOVQ iv+16(FP), R10
-	MOVQ initConsts+24(FP), R11
 
 	VPXOR    S0, S0, S0
 	MOVOU    (R10), X0
 	VMOVDQU  (R9), S1
 	VPCMPEQD S2, S2, S2
 	VPXOR    S3, S3, S3
-	VMOVDQU  (R11), S4
+	VMOVDQU  ·initializationConstants(SB), S4
 	VPXOR    M0, M0, M0
 	VMOVDQA  S1, Y6
 

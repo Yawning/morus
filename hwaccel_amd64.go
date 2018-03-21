@@ -16,7 +16,7 @@ func cpuidAmd64(cpuidParams *uint32)
 func xgetbv0Amd64(xcrVec *uint32)
 
 //go:noescape
-func initAVX2(s *uint64, key, iv *byte, initConsts *uint64)
+func initAVX2(s *uint64, key, iv *byte)
 
 //go:noescape
 func absorbBlocksAVX2(s *uint64, in *byte, blocks uint64)
@@ -69,7 +69,7 @@ func supportsAVX2() bool {
 }
 
 func initYMM(s *state, key, iv []byte) {
-	initAVX2(&s.s[0], &key[0], &iv[0], &initializationConstants[0])
+	initAVX2(&s.s[0], &key[0], &iv[0])
 }
 
 func absorbDataYMM(s *state, in []byte) {
