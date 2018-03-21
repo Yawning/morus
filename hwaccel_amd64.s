@@ -161,6 +161,7 @@ TEXT ·aeadEncryptAVX2(SB), NOSPLIT, $32-88
 	MOVQ    SP, R15
 	VPXOR   Y13, Y13, Y13
 	VMOVDQU Y13, (R15)
+	CLD
 
 	// Initialize the state.
 	MOVQ nonce+72(FP), R8
@@ -228,6 +229,7 @@ TEXT ·aeadDecryptAVX2(SB), NOSPLIT, $32-96
 	MOVQ    SP, R15
 	VPXOR   Y13, Y13, Y13
 	VMOVDQU Y13, (R15)
+	CLD
 
 	// Initialize the state.
 	MOVQ nonce+72(FP), R8
@@ -280,7 +282,6 @@ decryptPartial:
 	MOVQ    $32, CX
 	SUBQ    R9, CX
 	ADDQ    R9, DI
-	CLD
 	REP
 	STOSB
 	VMOVDQU (R15), M0
