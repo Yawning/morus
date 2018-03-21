@@ -18,22 +18,10 @@ func cpuidAmd64(cpuidParams *uint32)
 func xgetbv0Amd64(xcrVec *uint32)
 
 //go:noescape
-func initAVX2(s *uint64, key, iv *byte)
+func aeadEncryptAVX2(c, m, a []byte, nonce, key *byte)
 
 //go:noescape
-func absorbBlocksAVX2(s *uint64, in *byte, blocks uint64)
-
-//go:noescape
-func encryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
-
-//go:noescape
-func decryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
-
-//go:noescape
-func decryptLastBlockAVX2(s *uint64, out, in *byte, inLen uint64)
-
-//go:noescape
-func finalizeAVX2(s *uint64, tag *byte, lastBlock *uint64)
+func aeadDecryptAVX2(m, c, a []byte, nonce, key, tag *byte)
 
 func supportsAVX2() bool {
 	// https://software.intel.com/en-us/articles/how-to-detect-new-instruction-support-in-the-4th-generation-intel-core-processor-family
@@ -70,96 +58,15 @@ func supportsAVX2() bool {
 	return regs[1]&avx2Bit != 0
 }
 
-type ymmState struct {
-	s [20]uint64
-}
-
-func (s *ymmState) init(key, iv []byte) {
-	initAVX2(&s.s[0], &key[0], &iv[0])
-}
-
-func (s *ymmState) absorbData(in []byte) {
-	inLen, off := len(in), 0
-	if inLen == 0 {
-		return
-	}
-
-	if inBlocks := inLen / blockSize; inBlocks > 0 {
-		absorbBlocksAVX2(&s.s[0], &in[0], uint64(inBlocks))
-		off += inBlocks * blockSize
-	}
-	in = in[off:]
-
-	if len(in) > 0 {
-		var tmp [blockSize]byte
-		copy(tmp[:], in)
-		absorbBlocksAVX2(&s.s[0], &tmp[0], 1)
-	}
-}
-
-func (s *ymmState) encryptData(out, in []byte) {
-	inLen, off := len(in), 0
-	if inLen == 0 {
-		return
-	}
-
-	if inBlocks := inLen / blockSize; inBlocks > 0 {
-		encryptBlocksAVX2(&s.s[0], &out[0], &in[0], uint64(inBlocks))
-		off += inBlocks * blockSize
-	}
-	out, in = out[off:], in[off:]
-
-	if len(in) > 0 {
-		var tmp [blockSize]byte
-		copy(tmp[:], in)
-		encryptBlocksAVX2(&s.s[0], &tmp[0], &tmp[0], 1)
-		copy(out, tmp[:])
-	}
-}
-
-func (s *ymmState) decryptData(out, in []byte) {
-	inLen, off := len(in), 0
-	if inLen == 0 {
-		return
-	}
-
-	if inBlocks := inLen / blockSize; inBlocks > 0 {
-		decryptBlocksAVX2(&s.s[0], &out[0], &in[0], uint64(inBlocks))
-		off += inBlocks * blockSize
-	}
-	out, in = out[off:], in[off:]
-
-	if len(in) > 0 {
-		var tmp [blockSize]byte
-		copy(tmp[:], in)
-		decryptLastBlockAVX2(&s.s[0], &tmp[0], &tmp[0], uint64(len(in)))
-		copy(out, tmp[:])
-	}
-}
-
-func (s *ymmState) finalize(msgLen, adLen uint64, tag []byte) {
-	var lastBlock = [4]uint64{adLen << 3, msgLen << 3, 0, 0}
-	finalizeAVX2(&s.s[0], &tag[0], &lastBlock[0])
-}
-
 func aeadEncryptYMM(c, m, a, nonce, key []byte) []byte {
-	var s ymmState
 	mLen := len(m)
-
 	ret, out := sliceForAppend(c, mLen+TagSize)
-
-	s.init(key, nonce)
-	s.absorbData(a)
-	s.encryptData(out, m)
-	s.finalize(uint64(mLen), uint64(len(a)), out[mLen:])
-
-	burnUint64s(s.s[:])
+	aeadEncryptAVX2(out, m, a, &nonce[0], &key[0])
 
 	return ret
 }
 
 func aeadDecryptYMM(m, c, a, nonce, key []byte) ([]byte, bool) {
-	var s ymmState
 	var tag [TagSize]byte
 	cLen := len(c)
 
@@ -169,11 +76,7 @@ func aeadDecryptYMM(m, c, a, nonce, key []byte) ([]byte, bool) {
 
 	mLen := cLen - TagSize
 	ret, out := sliceForAppend(m, mLen)
-
-	s.init(key, nonce)
-	s.absorbData(a)
-	s.decryptData(out, c[:mLen])
-	s.finalize(uint64(mLen), uint64(len(a)), tag[:])
+	aeadDecryptAVX2(out, c[:mLen], a, &nonce[0], &key[0], &tag[0])
 
 	srcTag := c[mLen:]
 	ok := subtle.ConstantTimeCompare(srcTag, tag[:]) == 1
@@ -182,8 +85,6 @@ func aeadDecryptYMM(m, c, a, nonce, key []byte) ([]byte, bool) {
 		burnBytes(out[:mLen])
 		ret = nil
 	}
-
-	burnUint64s(s.s[:])
 
 	return ret, ok
 }

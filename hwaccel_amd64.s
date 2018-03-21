@@ -33,9 +33,7 @@ TEXT ·xgetbv0Amd64(SB), NOSPLIT, $0-8
 // function, along with aliases for the registers used for readability.
 
 // YMM Registers: Sx -> State, Mx -> Message, Tx -> Temporary
-//
-// Note: Routines use other registers as temporaries, the Tx aliases are
-// for those that are clobbered by STATE_UPDATE().
+// GP Registers: RAX, RBX, RCX -> Temporary
 #define S0 Y0
 #define S1 Y1
 #define S2 Y2
@@ -44,20 +42,6 @@ TEXT ·xgetbv0Amd64(SB), NOSPLIT, $0-8
 #define M0 Y5
 #define T0 Y14
 #define T1 Y15
-
-#define LOAD_STATE(SRC) \
-	VMOVDQU (SRC), S0    \
-	VMOVDQU 32(SRC), S1  \
-	VMOVDQU 64(SRC), S2  \
-	VMOVDQU 96(SRC), S3  \
-	VMOVDQU 128(SRC), S4
-
-#define STORE_STATE(DST) \
-	VMOVDQU S0, (DST)    \
-	VMOVDQU S1, 32(DST)  \
-	VMOVDQU S2, 64(DST)  \
-	VMOVDQU S3, 96(DST)  \
-	VMOVDQU S4, 128(DST)
 
 // This essentially naively translated from the intrinsics, but neither GCC nor
 // clang's idea of what this should be appears to be better on Broadwell, and
@@ -108,165 +92,209 @@ TEXT ·xgetbv0Amd64(SB), NOSPLIT, $0-8
 	VPOR   T0, T1, S4    \
 	VPERMQ $-109, S2, S2
 
-// func initAVX2(s *uint64, key, iv *byte)
-TEXT ·initAVX2(SB), NOSPLIT, $0-24
-	MOVQ s+0(FP), R8
-	MOVQ key+8(FP), R9
-	MOVQ iv+16(FP), R10
+#define COPY(DST, SRC, LEN) \
+	MOVQ SRC, SI \
+	MOVQ DST, DI \
+	MOVQ LEN, CX \
+	REP          \
+	MOVSB
 
-	VPXOR    S0, S0, S0
-	MOVOU    (R10), X0
-	VMOVDQU  (R9), S1
-	VPCMPEQD S2, S2, S2
-	VPXOR    S3, S3, S3
-	VMOVDQU  ·initializationConstants(SB), S4
-	VPXOR    M0, M0, M0
-	VMOVDQA  S1, Y6
+#define INIT_STATE(IV, KEY) \
+	VPXOR     S0, S0, S0                       \
+	MOVOU     (IV), X0                         \
+	VMOVDQU   (KEY), S1                        \
+	VPCMPEQD  S2, S2, S2                       \
+	VPXOR     S3, S3, S3                       \
+	VMOVDQU   ·initializationConstants(SB), S4 \
+	VPXOR     M0, M0, M0                       \
+	VMOVDQA   S1, Y6                           \
+	MOVQ      $16, AX                          \
+	                                           \
+initLoop:                                    \
+	STATE_UPDATE()                             \
+	SUBQ      $1, AX                           \
+	JNZ       initLoop                         \
+	                                           \
+	VPXOR     Y6, S1, S1
 
-	MOVQ $16, AX
+#define ABSORB_BLOCKS(A, ALEN, SCRATCH) \
+	MOVQ            ALEN, AX       \
+	SHRQ            $5, AX         \
+	JZ              absorbPartial  \
+loopAbsorbFull:                  \
+	VMOVDQU         (A), M0        \
+	STATE_UPDATE()                 \
+	ADDQ            $32, A         \
+	SUBQ            $1, AX         \
+	JNZ             loopAbsorbFull \
+absorbPartial:                   \
+	ANDQ            $31, ALEN      \
+	JZ              absorbDone     \
+	COPY(SCRATCH, A, ALEN)         \
+	VMOVDQU         (SCRATCH), M0  \
+	STATE_UPDATE()                 \
+absorbDone:
 
-initloop:
-	STATE_UPDATE()
-	SUBQ $1, AX
-	JNZ  initloop
+#define FINALIZE(TAG, ALEN, MLEN, SCRATCH) \
+	SHLQ       $3, ALEN         \
+	MOVQ       ALEN, (SCRATCH)  \
+	SHLQ       $3, MLEN         \
+	MOVQ       MLEN, 8(SCRATCH) \
+	                            \
+	VPXOR      S4, S0, S4       \
+	VMOVDQU    (SCRATCH), M0    \
+	                            \
+	MOVQ       $10, AX          \
+loopFinal:                    \
+	STATE_UPDATE()              \
+	SUBQ       $1, AX           \
+	JNZ        loopFinal        \
+	                            \
+	VPERMQ     $57, S1, Y6      \
+	VPXOR      S0, Y6, Y6       \
+	VPAND      S2, S3, Y7       \
+	VPXOR      Y6, Y7, Y7       \
+	MOVOU      X7, (TAG)
 
-	VPXOR Y6, S1, S1
-	STORE_STATE(R8)
+// func aeadEncryptAVX2(c, m, a []byte, nonce, key *byte)
+TEXT ·aeadEncryptAVX2(SB), NOSPLIT, $32-88
+	MOVQ    SP, R15
+	VPXOR   Y13, Y13, Y13
+	VMOVDQU Y13, (R15)
 
-	VZEROUPPER
-	RET
+	// Initialize the state.
+	MOVQ nonce+72(FP), R8
+	MOVQ key+80(FP), R9
+	INIT_STATE(R8, R9)
 
-// func absorbBlocksAVX2(s *uint64, in *byte, blocks uint64)
-TEXT ·absorbBlocksAVX2(SB), NOSPLIT, $0-24
-	MOVQ s+0(FP), R8
-	MOVQ in+8(FP), R10
-	MOVQ blocks+16(FP), R11
+	// Absorb the AD.
+	MOVQ a+48(FP), R8 // &a[0] -> R8
+	MOVQ a+56(FP), R9 // len(a) -> R9
+	ABSORB_BLOCKS(R8, R9, R15)
 
-	LOAD_STATE(R8)
+	// Encrypt the data.
+	MOVQ m+24(FP), R8 // &m[0] -> R8
+	MOVQ m+32(FP), R9 // len(m) -> R9
+	MOVQ c+0(FP), R10 // &c[0] -> R10
 
-loopblocks:
-	VMOVDQU (R10), M0
-	STATE_UPDATE()
-	ADDQ    $32, R10
-	SUBQ    $1, R11
-	JNZ     loopblocks
+	MOVQ R9, AX
+	SHRQ $5, AX
+	JZ   encryptPartial
 
-	STORE_STATE(R8)
-
-	VZEROUPPER
-	RET
-
-// func encryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
-TEXT ·encryptBlocksAVX2(SB), NOSPLIT, $0-32
-	MOVQ s+0(FP), R8
-	MOVQ out+8(FP), R9
-	MOVQ in+16(FP), R10
-	MOVQ blocks+24(FP), R11
-
-	LOAD_STATE(R8)
-
-loopblocks:
-	VMOVDQU (R10), M0
+loopEncryptFull:
+	VMOVDQU (R8), M0
 	VPERMQ  $57, S1, Y6
 	VPXOR   S0, Y6, Y6
 	VPAND   S2, S3, Y7
 	VPXOR   Y6, Y7, Y6
 	VPXOR   M0, Y6, Y6
-	VMOVDQU Y6, (R9)
+	VMOVDQU Y6, (R10)
 	STATE_UPDATE()
-	ADDQ    $32, R9
+	ADDQ    $32, R8
 	ADDQ    $32, R10
-	SUBQ    $1, R11
-	JNZ     loopblocks
+	SUBQ    $1, AX
+	JNZ     loopEncryptFull
 
-	STORE_STATE(R8)
+encryptPartial:
+	ANDQ    $31, R9
+	JZ      encryptDone
+	VMOVDQU Y13, (R15)
+	COPY(R15, R8, R9)
+	VMOVDQU (R15), M0
+	VPERMQ  $57, S1, Y6
+	VPXOR   S0, Y6, Y6
+	VPAND   S2, S3, Y7
+	VPXOR   Y6, Y7, Y6
+	VPXOR   M0, Y6, Y6
+	VMOVDQU Y6, (R15)
+	STATE_UPDATE()
+	COPY(R10, R15, R9)
+	ADDQ    R9, R10
 
+encryptDone:
+
+	// Finalize and write the tag.
+	MOVQ    a+56(FP), R8 // len(a) -> R8
+	MOVQ    m+32(FP), R9 // len(m) -> R9
+	VMOVDQU Y13, (R15)
+	FINALIZE(R10, R8, R9, R15)
+
+	VMOVDQU Y13, (R15)
 	VZEROUPPER
 	RET
 
-// func decryptBlocksAVX2(s *uint64, out, in *byte, blocks uint64)
-TEXT ·decryptBlocksAVX2(SB), NOSPLIT, $0-32
-	MOVQ s+0(FP), R8
-	MOVQ out+8(FP), R9
-	MOVQ in+16(FP), R10
-	MOVQ blocks+24(FP), R11
+// func aeadDecryptAVX2(m, c, a []byte, nonce, key, tag *byte)
+TEXT ·aeadDecryptAVX2(SB), NOSPLIT, $32-96
+	MOVQ    SP, R15
+	VPXOR   Y13, Y13, Y13
+	VMOVDQU Y13, (R15)
 
-	LOAD_STATE(R8)
+	// Initialize the state.
+	MOVQ nonce+72(FP), R8
+	MOVQ key+80(FP), R9
+	INIT_STATE(R8, R9)
 
-loopblocks:
-	VMOVDQU (R10), M0
+	// Absorb the AD.
+	MOVQ a+48(FP), R8 // &a[0] -> R8
+	MOVQ a+56(FP), R9 // len(a) -> R9
+	ABSORB_BLOCKS(R8, R9, R15)
+
+	// Decrypt the data.
+	MOVQ c+24(FP), R8 // &c[0] -> R8
+	MOVQ c+32(FP), R9 // len(c) -> R9
+	MOVQ m+0(FP), R10 // &m[0] -> R10
+
+	MOVQ R9, AX
+	SHRQ $5, AX
+	JZ   decryptPartial
+
+loopDecryptFull:
+	VMOVDQU (R8), M0
 	VPERMQ  $57, S1, Y6
 	VPXOR   S0, Y6, Y6
 	VPAND   S2, S3, Y7
 	VPXOR   Y6, Y7, Y6
 	VPXOR   M0, Y6, M0
-	VMOVDQU M0, (R9)
+	VMOVDQU M0, (R10)
 	STATE_UPDATE()
-	ADDQ    $32, R9
+	ADDQ    $32, R8
 	ADDQ    $32, R10
-	SUBQ    $1, R11
-	JNZ     loopblocks
+	SUBQ    $1, AX
+	JNZ     loopDecryptFull
 
-	STORE_STATE(R8)
-
-	VZEROUPPER
-	RET
-
-// func decryptLastBlockAVX2(s *uint64, out, in *byte, inLen uint64)
-TEXT ·decryptLastBlockAVX2(SB), NOSPLIT, $0-32
-	MOVQ s+0(FP), R8
-	MOVQ out+8(FP), R9
-	MOVQ in+16(FP), R10
-	MOVQ inLen+24(FP), R11
-
-	LOAD_STATE(R8)
-
-	VMOVDQU (R10), M0
+decryptPartial:
+	ANDQ    $31, R9
+	JZ      decryptDone
+	VMOVDQU Y13, (R15)
+	COPY(R15, R8, R9)
+	VMOVDQU (R15), M0
 	VPERMQ  $57, S1, Y6
 	VPXOR   S0, Y6, Y6
 	VPAND   S2, S3, Y7
 	VPXOR   Y6, Y7, Y6
 	VPXOR   M0, Y6, M0
-	VMOVDQU M0, (R9)
-
-	MOVQ R11, AX
-
-loopclear:
-	MOVB $0, (R9)(AX*1)
-	ADDQ $1, AX
-	CMPQ AX, $32
-	JNE  loopclear
-
-	VMOVDQU (R9), M0
+	VMOVDQU M0, (R15)
+	COPY(R10, R15, R9)
+	MOVQ    $0, AX
+	MOVQ    R15, DI
+	MOVQ    $32, CX
+	SUBQ    R9, CX
+	ADDQ    R9, DI
+	CLD
+	REP
+	STOSB
+	VMOVDQU (R15), M0
 	STATE_UPDATE()
-	STORE_STATE(R8)
 
-	VZEROUPPER
-	RET
+decryptDone:
 
-// func finalizeAVX2(s *uint64, tag *byte, lastBlock *uint64)
-TEXT ·finalizeAVX2(SB), NOSPLIT, $0-24
-	MOVQ s+0(FP), R8
-	MOVQ tag+8(FP), R9
-	MOVQ lastBlock+16(FP), R10
+	// Finalize and write the tag.
+	MOVQ    a+56(FP), R8    // len(a) -> R8
+	MOVQ    m+32(FP), R9    // len(m) -> R9
+	MOVQ    tag+88(FP), R14 // tag -> R14
+	VMOVDQU Y13, (R15)
+	FINALIZE(R14, R8, R9, R15)
 
-	LOAD_STATE(R8)
-
-	VPXOR   S4, S0, S4
-	VMOVDQU (R10), M0
-
-	MOVQ $10, AX
-
-finalloop:
-	STATE_UPDATE()
-	SUBQ $1, AX
-	JNZ  finalloop
-
-	VPERMQ $57, S1, Y6
-	VPXOR  S0, Y6, Y6
-	VPAND  S2, S3, Y7
-	VPXOR  Y6, Y7, Y7
-	MOVOU  X7, (R9)
-
+	VMOVDQU Y13, (R15)
 	VZEROUPPER
 	RET
