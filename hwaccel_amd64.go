@@ -9,6 +9,8 @@
 
 package morus
 
+import "crypto/subtle"
+
 //go:noescape
 func cpuidAmd64(cpuidParams *uint32)
 
@@ -68,11 +70,15 @@ func supportsAVX2() bool {
 	return regs[1]&avx2Bit != 0
 }
 
-func initYMM(s *state, key, iv []byte) {
+type ymmState struct {
+	s [20]uint64
+}
+
+func (s *ymmState) init(key, iv []byte) {
 	initAVX2(&s.s[0], &key[0], &iv[0])
 }
 
-func absorbDataYMM(s *state, in []byte) {
+func (s *ymmState) absorbData(in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
@@ -91,7 +97,7 @@ func absorbDataYMM(s *state, in []byte) {
 	}
 }
 
-func encryptDataYMM(s *state, out, in []byte) {
+func (s *ymmState) encryptData(out, in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
@@ -111,7 +117,7 @@ func encryptDataYMM(s *state, out, in []byte) {
 	}
 }
 
-func decryptDataYMM(s *state, out, in []byte) {
+func (s *ymmState) decryptData(out, in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
@@ -131,18 +137,61 @@ func decryptDataYMM(s *state, out, in []byte) {
 	}
 }
 
-func finalizeYMM(s *state, msgLen, adLen uint64, tag []byte) {
+func (s *ymmState) finalize(msgLen, adLen uint64, tag []byte) {
 	var lastBlock = [4]uint64{adLen << 3, msgLen << 3, 0, 0}
 	finalizeAVX2(&s.s[0], &tag[0], &lastBlock[0])
 }
 
+func aeadEncryptYMM(c, m, a, nonce, key []byte) []byte {
+	var s ymmState
+	mLen := len(m)
+
+	ret, out := sliceForAppend(c, mLen+TagSize)
+
+	s.init(key, nonce)
+	s.absorbData(a)
+	s.encryptData(out, m)
+	s.finalize(uint64(mLen), uint64(len(a)), out[mLen:])
+
+	burnUint64s(s.s[:])
+
+	return ret
+}
+
+func aeadDecryptYMM(m, c, a, nonce, key []byte) ([]byte, bool) {
+	var s ymmState
+	var tag [TagSize]byte
+	cLen := len(c)
+
+	if cLen < TagSize {
+		return nil, false
+	}
+
+	mLen := cLen - TagSize
+	ret, out := sliceForAppend(m, mLen)
+
+	s.init(key, nonce)
+	s.absorbData(a)
+	s.decryptData(out, c[:mLen])
+	s.finalize(uint64(mLen), uint64(len(a)), tag[:])
+
+	srcTag := c[mLen:]
+	ok := subtle.ConstantTimeCompare(srcTag, tag[:]) == 1
+	if !ok && mLen > 0 {
+		// Burn decrypted plaintext on auth failure.
+		burnBytes(out[:mLen])
+		ret = nil
+	}
+
+	burnUint64s(s.s[:])
+
+	return ret, ok
+}
+
 var implAVX2 = &hwaccelImpl{
 	name:          "AVX2",
-	initFn:        initYMM,
-	absorbDataFn:  absorbDataYMM,
-	encryptDataFn: encryptDataYMM,
-	decryptDataFn: decryptDataYMM,
-	finalizeFn:    finalizeYMM,
+	aeadEncryptFn: aeadEncryptYMM,
+	aeadDecryptFn: aeadDecryptYMM,
 }
 
 func initHardwareAcceleration() {

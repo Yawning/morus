@@ -12,7 +12,7 @@
 package morus
 
 import (
-	"crypto/subtle"
+	"encoding/binary"
 	"errors"
 )
 
@@ -42,6 +42,20 @@ var (
 	// ErrOpen is the error returned when the message authentication fails
 	// during an Open call.
 	ErrOpen = errors.New("morus: message authentication failed")
+
+	rawInitializationConstant = [32]byte{
+		0x0, 0x1, 0x01, 0x02, 0x03, 0x05, 0x08, 0x0d,
+		0x15, 0x22, 0x37, 0x59, 0x90, 0xe9, 0x79, 0x62,
+		0xdb, 0x3d, 0x18, 0x55, 0x6d, 0xc2, 0x2f, 0xf1,
+		0x20, 0x11, 0x31, 0x42, 0x73, 0xb5, 0x28, 0xdd,
+	}
+	initializationConstants [4]uint64
+
+	// Neither the specification document nor the portable reference
+	// implementations define how this should be handled.  However the
+	// AVX2 implementation isn't byte swapping, so it's likely safe to
+	// assume little endian.
+	byteOrder = binary.LittleEndian
 )
 
 // AEAD is a MORUS instance, implementing crypto/cipher.AEAD.
@@ -72,7 +86,7 @@ func (ae *AEAD) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	if len(nonce) != NonceSize {
 		panic(ErrInvalidNonceSize)
 	}
-	dst = aeadEncrypt(dst, plaintext, additionalData, nonce, ae.key)
+	dst = hardwareAccelImpl.aeadEncryptFn(dst, plaintext, additionalData, nonce, ae.key)
 	return dst
 }
 
@@ -94,7 +108,7 @@ func (ae *AEAD) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, err
 	if len(nonce) != NonceSize {
 		panic(ErrInvalidNonceSize)
 	}
-	dst, ok = aeadDecrypt(dst, ciphertext, additionalData, nonce, ae.key)
+	dst, ok = hardwareAccelImpl.aeadDecryptFn(dst, ciphertext, additionalData, nonce, ae.key)
 	if !ok {
 		err = ErrOpen
 	}
@@ -114,52 +128,6 @@ func New(key []byte) *AEAD {
 	return &AEAD{key: append([]byte{}, key...)}
 }
 
-func aeadEncrypt(c, m, a, nonce, key []byte) []byte {
-	var s state
-	mLen := len(m)
-
-	ret, out := sliceForAppend(c, mLen+TagSize)
-
-	hardwareAccelImpl.initFn(&s, key, nonce)
-	hardwareAccelImpl.absorbDataFn(&s, a)
-	hardwareAccelImpl.encryptDataFn(&s, out, m)
-	hardwareAccelImpl.finalizeFn(&s, uint64(mLen), uint64(len(a)), out[mLen:])
-
-	burnUint64s(s.s[:])
-
-	return ret
-}
-
-func aeadDecrypt(m, c, a, nonce, key []byte) ([]byte, bool) {
-	var s state
-	var tag [TagSize]byte
-	cLen := len(c)
-
-	if cLen < TagSize {
-		return nil, false
-	}
-
-	mLen := cLen - TagSize
-	ret, out := sliceForAppend(m, mLen)
-
-	hardwareAccelImpl.initFn(&s, key, nonce)
-	hardwareAccelImpl.absorbDataFn(&s, a)
-	hardwareAccelImpl.decryptDataFn(&s, out, c[:mLen])
-	hardwareAccelImpl.finalizeFn(&s, uint64(mLen), uint64(len(a)), tag[:])
-
-	srcTag := c[mLen:]
-	ok := subtle.ConstantTimeCompare(srcTag, tag[:]) == 1
-	if !ok && mLen > 0 {
-		// Burn decrypted plaintext on auth failure.
-		burnBytes(out[:mLen])
-		ret = nil
-	}
-
-	burnUint64s(s.s[:])
-
-	return ret, ok
-}
-
 // Shamelessly stolen from the Go runtime library.
 func sliceForAppend(in []byte, n int) (head, tail []byte) {
 	if total := len(in) + n; cap(in) >= total {
@@ -170,4 +138,11 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 	}
 	tail = head[len(in):]
 	return
+}
+
+func init() {
+	initializationConstants[0] = byteOrder.Uint64(rawInitializationConstant[0:])
+	initializationConstants[1] = byteOrder.Uint64(rawInitializationConstant[8:])
+	initializationConstants[2] = byteOrder.Uint64(rawInitializationConstant[16:])
+	initializationConstants[3] = byteOrder.Uint64(rawInitializationConstant[24:])
 }

@@ -8,7 +8,7 @@
 package morus
 
 import (
-	"encoding/binary"
+	"crypto/subtle"
 	"math/bits"
 )
 
@@ -22,27 +22,11 @@ const (
 	blockSize = 32
 )
 
-var (
-	rawInitializationConstant = [32]byte{
-		0x0, 0x1, 0x01, 0x02, 0x03, 0x05, 0x08, 0x0d,
-		0x15, 0x22, 0x37, 0x59, 0x90, 0xe9, 0x79, 0x62,
-		0xdb, 0x3d, 0x18, 0x55, 0x6d, 0xc2, 0x2f, 0xf1,
-		0x20, 0x11, 0x31, 0x42, 0x73, 0xb5, 0x28, 0xdd,
-	}
-	initializationConstants [4]uint64
-
-	// Neither the specification document nor the portable reference
-	// implementations define how this should be handled.  However the
-	// AVX2 implementation isn't byte swapping, so it's likely safe to
-	// assume little endian.
-	byteOrder = binary.LittleEndian
-)
-
 type state struct {
 	s [20]uint64
 }
 
-func stateUpdateRef(s *state, msgBlk []byte) {
+func (s *state) update(msgBlk []byte) {
 	var tmp uint64
 
 	s00, s01, s02, s03, s10, s11, s12, s13, s20, s21, s22, s23, s30, s31, s32, s33, s40, s41, s42, s43 := s.s[0], s.s[1], s.s[2], s.s[3], s.s[4], s.s[5], s.s[6], s.s[7], s.s[8], s.s[9], s.s[10], s.s[11], s.s[12], s.s[13], s.s[14], s.s[15], s.s[16], s.s[17], s.s[18], s.s[19]
@@ -156,7 +140,7 @@ func stateUpdateRef(s *state, msgBlk []byte) {
 	s.s[0], s.s[1], s.s[2], s.s[3], s.s[4], s.s[5], s.s[6], s.s[7], s.s[8], s.s[9], s.s[10], s.s[11], s.s[12], s.s[13], s.s[14], s.s[15], s.s[16], s.s[17], s.s[18], s.s[19] = s00, s01, s02, s03, s10, s11, s12, s13, s20, s21, s22, s23, s30, s31, s32, s33, s40, s41, s42, s43
 }
 
-func encryptBlockRef(s *state, out, in []byte) {
+func (s *state) encryptBlock(out, in []byte) {
 	_, _ = in[31], out[31] // Bounds check elimination
 	in0 := byteOrder.Uint64(in[0:8])
 	in1 := byteOrder.Uint64(in[8:16])
@@ -168,7 +152,7 @@ func encryptBlockRef(s *state, out, in []byte) {
 	out2 := in2 ^ s.s[2] ^ s.s[7] ^ (s.s[10] & s.s[14])
 	out3 := in3 ^ s.s[3] ^ s.s[4] ^ (s.s[11] & s.s[15])
 
-	stateUpdateRef(s, in[:32])
+	s.update(in[:32])
 
 	// Doing this last lets this work in place.
 	byteOrder.PutUint64(out[0:8], out0)
@@ -177,7 +161,7 @@ func encryptBlockRef(s *state, out, in []byte) {
 	byteOrder.PutUint64(out[24:32], out3)
 }
 
-func decryptBlockCommon(s *state, out, in []byte) {
+func (s *state) decryptBlockCommon(out, in []byte) {
 	_, _ = in[31], out[31] // Bounds check elimination
 	in0 := byteOrder.Uint64(in[0:8])
 	in1 := byteOrder.Uint64(in[8:16])
@@ -195,22 +179,22 @@ func decryptBlockCommon(s *state, out, in []byte) {
 	byteOrder.PutUint64(out[24:32], out3)
 }
 
-func decryptBlockRef(s *state, out, in []byte) {
-	decryptBlockCommon(s, out, in)
-	stateUpdateRef(s, out[:32])
+func (s *state) decryptBlock(out, in []byte) {
+	s.decryptBlockCommon(out, in)
+	s.update(out[:32])
 }
 
-func decryptPartialBlockRef(s *state, out, in []byte) {
+func (s *state) decryptPartialBlock(out, in []byte) {
 	var tmp [blockSize]byte
 	copy(tmp[:], in)
-	decryptBlockCommon(s, tmp[:], tmp[:])
+	s.decryptBlockCommon(tmp[:], tmp[:])
 	copy(out, tmp[:])
 
 	burnBytes(tmp[len(in):])
-	stateUpdateRef(s, tmp[:])
+	s.update(tmp[:])
 }
 
-func initRef(s *state, key, iv []byte) {
+func (s *state) init(key, iv []byte) {
 	_, _ = key[31], iv[15] // Bounds check elimination
 	k0 := byteOrder.Uint64(key[0:8])
 	k1 := byteOrder.Uint64(key[8:16])
@@ -230,7 +214,7 @@ func initRef(s *state, key, iv []byte) {
 
 	var tmp [blockSize]byte
 	for i := 0; i < 16; i++ {
-		stateUpdateRef(s, tmp[:])
+		s.update(tmp[:])
 	}
 	s.s[4] ^= k0
 	s.s[5] ^= k1
@@ -240,60 +224,60 @@ func initRef(s *state, key, iv []byte) {
 	burnBytes(tmp[:])
 }
 
-func absorbDataRef(s *state, in []byte) {
+func (s *state) absorbData(in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
 	}
 
 	for inLen >= blockSize {
-		stateUpdateRef(s, in[off:off+blockSize])
+		s.update(in[off : off+blockSize])
 		inLen, off = inLen-blockSize, off+blockSize
 	}
 
 	if inLen > 0 {
 		var tmp [blockSize]byte
 		copy(tmp[:], in[off:])
-		stateUpdateRef(s, tmp[:])
+		s.update(tmp[:])
 	}
 }
 
-func encryptDataRef(s *state, out, in []byte) {
+func (s *state) encryptData(out, in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
 	}
 
 	for inLen >= blockSize {
-		encryptBlockRef(s, out[off:off+blockSize], in[off:off+blockSize])
+		s.encryptBlock(out[off:off+blockSize], in[off:off+blockSize])
 		inLen, off = inLen-blockSize, off+blockSize
 	}
 
 	if inLen > 0 {
 		var tmp [blockSize]byte
 		copy(tmp[:], in[off:])
-		encryptBlockRef(s, tmp[:], tmp[:])
+		s.encryptBlock(tmp[:], tmp[:])
 		copy(out[off:], tmp[:])
 	}
 }
 
-func decryptDataRef(s *state, out, in []byte) {
+func (s *state) decryptData(out, in []byte) {
 	inLen, off := len(in), 0
 	if inLen == 0 {
 		return
 	}
 
 	for inLen >= blockSize {
-		decryptBlockRef(s, out[off:off+blockSize], in[off:off+blockSize])
+		s.decryptBlock(out[off:off+blockSize], in[off:off+blockSize])
 		inLen, off = inLen-blockSize, off+blockSize
 	}
 
 	if inLen > 0 {
-		decryptPartialBlockRef(s, out[off:], in[off:])
+		s.decryptPartialBlock(out[off:], in[off:])
 	}
 }
 
-func finalizeRef(s *state, msgLen, adLen uint64, tag []byte) {
+func (s *state) finalize(msgLen, adLen uint64, tag []byte) {
 	var tmp [blockSize]byte
 	byteOrder.PutUint64(tmp[0:8], (adLen << 3))
 	byteOrder.PutUint64(tmp[8:16], (msgLen << 3))
@@ -304,7 +288,7 @@ func finalizeRef(s *state, msgLen, adLen uint64, tag []byte) {
 	s.s[19] ^= s.s[3]
 
 	for i := 0; i < 10; i++ {
-		stateUpdateRef(s, tmp[:])
+		s.update(tmp[:])
 	}
 
 	s.s[0] = s.s[0] ^ s.s[5] ^ (s.s[8] & s.s[12])
@@ -317,9 +301,48 @@ func finalizeRef(s *state, msgLen, adLen uint64, tag []byte) {
 	burnBytes(tmp[:])
 }
 
-func init() {
-	initializationConstants[0] = byteOrder.Uint64(rawInitializationConstant[0:])
-	initializationConstants[1] = byteOrder.Uint64(rawInitializationConstant[8:])
-	initializationConstants[2] = byteOrder.Uint64(rawInitializationConstant[16:])
-	initializationConstants[3] = byteOrder.Uint64(rawInitializationConstant[24:])
+func aeadEncryptRef(c, m, a, nonce, key []byte) []byte {
+	var s state
+	mLen := len(m)
+
+	ret, out := sliceForAppend(c, mLen+TagSize)
+
+	s.init(key, nonce)
+	s.absorbData(a)
+	s.encryptData(out, m)
+	s.finalize(uint64(mLen), uint64(len(a)), out[mLen:])
+
+	burnUint64s(s.s[:])
+
+	return ret
+}
+
+func aeadDecryptRef(m, c, a, nonce, key []byte) ([]byte, bool) {
+	var s state
+	var tag [TagSize]byte
+	cLen := len(c)
+
+	if cLen < TagSize {
+		return nil, false
+	}
+
+	mLen := cLen - TagSize
+	ret, out := sliceForAppend(m, mLen)
+
+	s.init(key, nonce)
+	s.absorbData(a)
+	s.decryptData(out, c[:mLen])
+	s.finalize(uint64(mLen), uint64(len(a)), tag[:])
+
+	srcTag := c[mLen:]
+	ok := subtle.ConstantTimeCompare(srcTag, tag[:]) == 1
+	if !ok && mLen > 0 {
+		// Burn decrypted plaintext on auth failure.
+		burnBytes(out[:mLen])
+		ret = nil
+	}
+
+	burnUint64s(s.s[:])
+
+	return ret, ok
 }

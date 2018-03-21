@@ -13,21 +13,15 @@ var (
 
 	implReference = &hwaccelImpl{
 		name:          "Reference",
-		initFn:        initRef,
-		absorbDataFn:  absorbDataRef,
-		encryptDataFn: encryptDataRef,
-		decryptDataFn: decryptDataRef,
-		finalizeFn:    finalizeRef,
+		aeadEncryptFn: aeadEncryptRef,
+		aeadDecryptFn: aeadDecryptRef,
 	}
 )
 
 type hwaccelImpl struct {
 	name          string
-	initFn        func(*state, []byte, []byte)
-	absorbDataFn  func(*state, []byte)
-	encryptDataFn func(*state, []byte, []byte)
-	decryptDataFn func(*state, []byte, []byte)
-	finalizeFn    func(*state, uint64, uint64, []byte)
+	aeadEncryptFn func([]byte, []byte, []byte, []byte, []byte) []byte
+	aeadDecryptFn func([]byte, []byte, []byte, []byte, []byte) ([]byte, bool)
 }
 
 func forceDisableHardwareAcceleration() {

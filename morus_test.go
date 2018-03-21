@@ -141,7 +141,7 @@ func doBenchmarkAEADEncrypt(b *testing.B, sz int) {
 	for i := 0; i < b.N; i++ {
 		c = c[:0]
 
-		c = aeadEncrypt(c, m, nil, nonce, key)
+		c = hardwareAccelImpl.aeadEncryptFn(c, m, nil, nonce, key)
 		if len(c) != sz+TagSize {
 			b.Fatalf("aeadEncrypt failed")
 		}
@@ -158,13 +158,13 @@ func doBenchmarkAEADDecrypt(b *testing.B, sz int) {
 	rand.Read(key)
 	rand.Read(m)
 
-	c = aeadEncrypt(c, m, nil, nonce, key)
+	c = hardwareAccelImpl.aeadEncryptFn(c, m, nil, nonce, key)
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
 		d = d[:0]
 
 		var ok bool
-		d, ok = aeadDecrypt(d, c, nil, nonce, key)
+		d, ok = hardwareAccelImpl.aeadDecryptFn(d, c, nil, nonce, key)
 		if !ok {
 			b.Fatalf("aeadDecrypt failed")
 		}
