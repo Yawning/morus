@@ -1,3 +1,5 @@
+# WARNING: This implementation is abandoned.  Pick another algorithm.
+
 ### MORUS - MORUS-1280-256 Authenticated Cipher
 #### Yawning Angel (yawning at schwanenlied dot me)
 
